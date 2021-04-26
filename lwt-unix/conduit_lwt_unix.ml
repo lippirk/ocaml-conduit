@@ -110,6 +110,7 @@ type tls_server_key = tls_own_key [@@deriving sexp]
 type ctx = {
   src: Unix.sockaddr option;
   tls_own_key: tls_own_key;
+  openssl_overrides : Conduit_lwt_unix_ssl.Overrides.t option;
 }
 
 let string_of_unix_sockaddr sa =
@@ -155,19 +156,19 @@ let flow_of_fd fd sa =
   | Unix.ADDR_INET (ip,port) -> TCP { fd; ip=Ipaddr_unix.of_inet_addr ip; port }
 
 let default_ctx =
-  { src=None; tls_own_key=`None }
+  { src=None; tls_own_key=`None; openssl_overrides=None; }
 
-let init ?src ?(tls_own_key=`None) ?(tls_server_key=`None) () =
+let init ?src ?(tls_own_key=`None) ?(tls_server_key=`None) ?openssl_overrides () =
   let tls_own_key =
     match tls_own_key with `None -> tls_server_key | _ -> tls_own_key in
   match src with
   | None ->
-    Lwt.return { src=None; tls_own_key }
+    Lwt.return { src=None; tls_own_key; openssl_overrides; }
   | Some host ->
     let open Unix in
     Lwt_unix.getaddrinfo host "0" [AI_PASSIVE; AI_SOCKTYPE SOCK_STREAM]
     >>= function
-    | {ai_addr;_}::_ -> Lwt.return { src=Some ai_addr; tls_own_key }
+    | {ai_addr;_}::_ -> Lwt.return { src=Some ai_addr; tls_own_key; openssl_overrides; }
     | [] -> Lwt.fail_with "Invalid conduit source address specified"
 
 module Sockaddr_io = struct
@@ -269,6 +270,18 @@ let connect_with_openssl ~ctx (`Hostname hostname, `IP ip, `Port port) =
           Conduit_lwt_unix_ssl.Client.create_ctx ~certfile ~keyfile ?password ()
         in
         Some ctx_ssl
+  in
+  let hostname, ctx_ssl =
+    match ctx.openssl_overrides with
+    | None | Some { client = None } -> (hostname, ctx_ssl)
+    | Some { client = Some overrides } ->
+        let hostname =
+          match overrides.hostname with Some x -> x | None -> hostname
+        in
+        let ctx_ssl =
+          match overrides.ctx with Some x -> Some x | None -> ctx_ssl
+        in
+        (hostname, ctx_ssl)
   in
   Conduit_lwt_unix_ssl.Client.connect ?ctx:ctx_ssl ?src:ctx.src ~hostname sa
   >>= fun (fd, ic, oc) ->
